@@ -2,6 +2,14 @@
 <html lang="en">
 <head>
 <script src="config.js"></script>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#243b53">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Order Book">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#243b53">
@@ -363,7 +371,7 @@ body.home .sync-line{display:block!important}
 
 <div class="hero no-print">
   <div class="marquee"><div class="marquee-track" id="mqTrack"></div></div>
-  <div class="pic-tools"><button class="btn light small" id="compToggle" type="button">⚙ Company Name &amp; Logo</button> <button class="btn light small" id="picToggle" type="button">🖼 Banner Pictures</button> <button class="btn light small" id="logoutBtn" type="button" style="display:none">⏻ Logout</button></div>
+  <div class="pic-tools"><button class="btn light small admin-only" id="compToggle" type="button">⚙ Company Name &amp; Logo</button> <button class="btn light small admin-only" id="picToggle" type="button">🖼 Banner Pictures</button> <button class="btn light small" id="logoutBtn" type="button" style="display:none">⏻ Logout</button></div>
   <div class="pic-panel" id="compPanel">
     <div class="grid" style="text-align:left">
       <div class="field full"><label>Company Name</label><input id="cName"></div>
@@ -1319,7 +1327,7 @@ const PIC_KEY="cosmic_line_banner_pics_v1";
 function getPics(){try{return JSON.parse(localStorage.getItem(PIC_KEY)||"[]")}catch(e){return []}}
 function setPics(a){try{localStorage.setItem(PIC_KEY,JSON.stringify(a))}catch(e){alert("Storage full. Delete some banner pictures.")}}
 function renderBanner(){
-  const pics=getPics();const track=document.getElementById("mqTrack");
+  const pics=window.CLOUD_ON?[]:getPics();const track=document.getElementById("mqTrack");
   let items=[];
   if(pics.length){items=pics.map(p=>`<div class="mq-item"><img src="${p}" alt=""></div>`)}
   else{
@@ -1912,6 +1920,7 @@ setNew();
     if(window.applyRole)applyRole();
     window.CLOUD_STATE={ordersTotal:r.ordersTotal,at:new Date()};
     setSync("☁ Google Sheet connected · synced "+hhmm(new Date())+" · tap to refresh"+(r.ordersTotal>(r.orders||[]).length?" · showing newest "+(r.orders||[]).length+" of "+r.ordersTotal:""));
+    syncImages(r);
     adminRerender();
   };
   function adminRerender(){const p=$("adminPage");if(p&&!p.classList.contains("hidden")&&window.renderAdmin)renderAdmin()}
@@ -2192,6 +2201,79 @@ setNew();
     finally{done()}
     showTest(out);
   };
+
+
+  /* ---------- shared banner pictures & company logo (stored in Google Drive) ---------- */
+  const IMG_KEY="cosmic_cloud_img_cache_v1",LOGO_KEY="cosmic_cloud_logo_v1";
+  const imgCache=(()=>{try{return JSON.parse(localStorage.getItem(IMG_KEY)||"{}")}catch(e){return{}}})();
+  const B=window.CLOUD_BANNER={ids:[],logoId:""};
+  function saveImgCache(){
+    Object.keys(imgCache).forEach(k=>{if(!B.ids.includes(k))delete imgCache[k]});
+    try{localStorage.setItem(IMG_KEY,JSON.stringify(imgCache))}catch(e){}
+  }
+  try{const lg=JSON.parse(localStorage.getItem(LOGO_KEY)||"null");if(lg&&lg.data){LOGO_DATA=lg.data;B.logoId=lg.id}}catch(e){}
+  renderBanner=function(){
+    const pics=B.ids.map(id=>imgCache[id]).filter(Boolean),track=$("mqTrack");
+    let items;
+    if(pics.length)items=pics.map(p=>`<div class="mq-item"><img src="${p}" alt=""></div>`);
+    else{
+      const names=[...new Set((db.products||[]).map(p=>p.name))].slice(0,14);
+      items=(names.length?names:[COMPANY.name||"COSMIC LINE"]).map(n=>`<div class="mq-item txt">${esc(n)}<small>${RB.can("admin")?"Add pictures ↓":""}</small></div>`);
+    }
+    while(items.length<8)items=items.concat(items);
+    const half=items.join("");
+    track.innerHTML=half+half;
+    track.style.setProperty("--mq-time",Math.max(20,items.length*3)+"s");
+    $("picThumbs").innerHTML=B.ids.filter(id=>imgCache[id]).map(id=>`<div><img src="${imgCache[id]}"><button type="button" onclick="cloudDelPic('${id}')">×</button></div>`).join("");
+  };
+  let syncing=false,again=null;
+  async function syncImages(r){
+    B.ids=r.banner||[];renderBanner();
+    if(syncing){again=r;return}
+    syncing=true;
+    try{
+      if(r.logoId&&r.logoId!==B.logoId){
+        try{const d=(await api("imageGet",{id:r.logoId})).data;LOGO_DATA=d;B.logoId=r.logoId;localStorage.setItem(LOGO_KEY,JSON.stringify({id:r.logoId,data:d}));applyCompany();const al=$("auLogo");if(al)al.src=d}catch(e){}
+      }
+      for(const id of B.ids){
+        if(imgCache[id])continue;
+        try{imgCache[id]=(await api("imageGet",{id})).data;renderBanner()}catch(e){}
+      }
+      saveImgCache();
+    }finally{syncing=false;if(again){const a=again;again=null;syncImages(a)}}
+  }
+  window.cloudDelPic=async function(id){
+    if(!confirm("Remove this picture for everyone?"))return;
+    const done=busy("Removing...");
+    try{const r=await api("bannerRemove",{id});B.ids=r.ids;saveImgCache();renderBanner()}catch(e){errMsg(e)}finally{done()}
+  };
+  $("picInput").onchange=async e=>{
+    const files=[...e.target.files];e.target.value="";if(!files.length)return;
+    const done=busy("Uploading pictures...");
+    try{
+      for(const f of files){
+        const d=await shrinkImage(f);if(!d)continue;
+        const r=await api("bannerAdd",{data:d});B.ids=r.ids;imgCache[r.id]=d;renderBanner();
+      }
+      saveImgCache();
+    }catch(er){errMsg(er)}finally{done()}
+  };
+  const hint=$("picPanel").querySelector("div[style*='font-size:12px']");
+  if(hint)hint.textContent="Pictures added or removed here change the scrolling banner for EVERYONE in the team.";
+  $("cSave").onclick=guard(async()=>{
+    const name=$("cName").value.trim();if(!name)return alert("Enter company name.");
+    await api("settingsSave",{settings:{CompanyName:name,CompanyAddress:$("cAddress").value.trim(),CompanyPhone:$("cPhone").value.trim(),CompanyEmail:$("cEmail").value.trim(),CompanyGSTIN:$("cGstin").value.trim()}});
+    COMPANY={name,address:$("cAddress").value.trim(),phone:$("cPhone").value.trim(),email:$("cEmail").value.trim(),gstin:$("cGstin").value.trim()};
+    if(window._newLogo){
+      const r=await api("logoSet",{data:window._newLogo});
+      LOGO_DATA=window._newLogo;B.logoId=r.id;
+      try{localStorage.setItem(LOGO_KEY,JSON.stringify({id:r.id,data:LOGO_DATA}))}catch(e){}
+      window._newLogo=null;const al=$("auLogo");if(al)al.src=LOGO_DATA;
+    }
+    applyCompany();$("compPanel").classList.remove("open");
+    alert("Company name and logo saved for the whole team.");
+  });
+  renderBanner();
 
   /* hide local-only admin pieces that do not apply */
   document.body.classList.add("cloud-mode");
@@ -2480,6 +2562,7 @@ setNew();
   }
   window._auth={sha256,hashPin,getUsers,saveUsers};
 })();
+if("serviceWorker" in navigator && /^https?:/.test(location.protocol)) navigator.serviceWorker.register("sw.js").catch(()=>{});
 </script>
 </body>
 </html>
