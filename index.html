@@ -856,7 +856,8 @@ function saveOrder(){
 }
 function populateSalon(){
   const name=document.getElementById("salon").value.trim().toLowerCase();
-  const s=db.salons.find(x=>x.name.toLowerCase()===name);
+  const mine=window.CURRENT_USER&&window.CURRENT_USER.username;
+  const s=db.salons.find(x=>x.name.toLowerCase()===name&&(!window.CLOUD_ON||x.owner===mine))||db.salons.find(x=>x.name.toLowerCase()===name&&!window.CLOUD_ON);
   if(s){
     document.getElementById("contact").value=s.contact||"";
     document.getElementById("mobile").value=s.mobile||"";
@@ -941,10 +942,15 @@ document.getElementById("historySearch").addEventListener("input",renderHistory)
 
 function renderSalons(){
   const box=document.getElementById("salonListView");
-  if(!db.salons.length){box.innerHTML='<div class="empty">No customers saved yet.</div>';return}
-  box.innerHTML=db.salons.map((s,i)=>`<div class="salon-item">
-    <div><strong>${esc(s.name)}</strong>${s.type?` <span class="muted">(${esc(s.type)})</span>`:""}<br><span class="muted">${esc(s.contact||"")} ${esc(s.mobile||"")}</span><br><span class="muted">${esc(s.address||"")}</span></div>
-    <button class="btn danger small" onclick="deleteSalon(${i})">DELETE</button>
+  const me=window.CURRENT_USER, cloud=!!window.CLOUD_ON;
+  const isAdm=cloud&&window.RB&&RB.can("admin");
+  const seeAll=cloud&&me&&me.viewAll;
+  let note="";
+  if(cloud&&me)note=seeAll?`<div class="muted" style="margin-bottom:8px">${isAdm?"You can see every client.":"You have access to all clients."}</div>`:`<div class="muted" style="margin-bottom:8px">You see only your own clients.</div>`;
+  if(!db.salons.length){box.innerHTML=note+'<div class="empty">No customers saved yet.</div>';return}
+  box.innerHTML=note+db.salons.map((s,i)=>`<div class="salon-item">
+    <div><strong>${esc(s.name)}</strong>${s.type?` <span class="muted">(${esc(s.type)})</span>`:""}${cloud&&s.owner&&me&&s.owner!==me.username?` <span class="pill">👤 ${esc(s.ownerName||s.owner)}</span>`:""}<br><span class="muted">${esc(s.contact||"")} ${esc(s.mobile||"")}</span><br><span class="muted">${esc(s.address||"")}</span></div>
+    <div class="actions">${isAdm?`<button class="btn light small" onclick="assignOwner(${i})">OWNER</button>`:""}${(!cloud||isAdm)?`<button class="btn danger small" onclick="deleteSalon(${i})">DELETE</button>`:""}</div>
   </div>`).join("");
 }
 window.deleteSalon=function(i){if(confirm("Delete this customer?")){db.salons.splice(i,1);saveDB();refreshAll()}};
@@ -952,8 +958,10 @@ document.getElementById("saveSalon").onclick=()=>{
   const s={name:document.getElementById("sName").value.trim(),type:document.getElementById("sType").value,contact:document.getElementById("sContact").value.trim(),mobile:document.getElementById("sMobile").value.trim(),area:document.getElementById("sArea").value.trim(),address:document.getElementById("sAddress").value.trim()};
   if(!s.name){alert("Enter Customer Name.");return}
   if(!s.type){alert("Select Customer Type.");return}
-  const i=db.salons.findIndex(x=>x.name.toLowerCase()===s.name.toLowerCase());
-  if(i>=0) db.salons[i]=s; else db.salons.push(s);
+  const meU=window.CURRENT_USER&&window.CURRENT_USER.username;
+  const i=db.salons.findIndex(x=>x.name.toLowerCase()===s.name.toLowerCase()&&(!window.CLOUD_ON||x.owner===meU));
+  if(window.CLOUD_ON){s.owner=meU;s.ownerName=window.CURRENT_USER.name}
+  if(i>=0) db.salons[i]=Object.assign({},db.salons[i],s); else db.salons.push(s);
   saveDB(); ["sName","sType","sContact","sMobile","sArea","sAddress"].forEach(id=>document.getElementById(id).value="");
   refreshAll(); alert("Customer saved."); audit("SAVE_CUSTOMER",s.name,s.type); if(window.cloudSync)cloudSync("saveCustomer",{customer:s});
 };
@@ -2039,7 +2047,15 @@ setNew();
     if(!RB.can("delete")){alert("Only an Admin can delete customers.");return}
     const s=db.salons[i];if(!s||!confirm("Delete customer \""+s.name+"\"?"))return;
     const done=busy("Deleting...");
-    try{await api("deleteCustomer",{name:s.name});db.salons.splice(i,1);saveDB();refreshAll();adminRerender()}
+    try{await api("deleteCustomer",{name:s.name,owner:s.owner});db.salons.splice(i,1);saveDB();refreshAll();adminRerender()}
+    catch(e){errMsg(e)}finally{done()}
+  };
+  window.assignOwner=async function(i){
+    const c=db.salons[i];if(!c)return;
+    const to=prompt("Move client \""+c.name+"\" (now: "+(c.ownerName||c.owner)+")\n\nEnter the USERNAME of the new owner:");
+    if(!to)return;
+    const done=busy("Updating...");
+    try{await api("customerAssign",{name:c.name,owner:c.owner,newOwner:to.trim().toLowerCase()});await cloudRefresh(true)}
     catch(e){errMsg(e)}finally{done()}
   };
   window.delProduct=async function(i){
@@ -2084,7 +2100,7 @@ setNew();
         <div class="field"><label>4-digit PIN</label><input id="cuPin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password"></div>
       </div>
       <div class="actions" style="margin-top:9px"><button class="btn green" onclick="AD.createUser()">CREATE ACCOUNT</button></div>
-      <div class="role-help"><b>Admin:</b> full access &nbsp;·&nbsp; <b>Representative:</b> create orders &nbsp;·&nbsp; <b>Manager:</b> approve and monitor &nbsp;·&nbsp; <b>Viewer:</b> read-only</div></div>
+      <div class="role-help"><b>Admin:</b> full access &nbsp;·&nbsp; <b>Representative:</b> create orders &nbsp;·&nbsp; <b>Manager:</b> approve and monitor &nbsp;·&nbsp; <b>Viewer:</b> read-only<br><b>Clients:</b> everyone sees only their own clients. Choose "ALL clients" next to a person to let them see every client. "MOVE CLIENTS" hands one person's clients to another.</div></div>
     <div class="card"><h3>Team Accounts (${r.users.length})</h3>`;
     h+=r.users.map(u=>{
       const self=me&&u.username===me.username,st=u.status;
@@ -2094,6 +2110,8 @@ setNew();
         <div class="ad-ctl">
           <input value="${esc(u.designation||"")}" placeholder="Designation" list="desigList" onchange="AD.setDesig('${u.username}',this.value)">
           <select ${self?"disabled":""} onchange="AD.setRole('${u.username}',this.value)">${opts(u.role)}</select>
+          <select ${u.role==="Admin"?"disabled":""} title="Which clients this person can see" onchange="AD.setViewAll('${u.username}',this.value==='1')"><option value="0" ${u.viewAll?"":"selected"}>Own clients only</option><option value="1" ${u.viewAll?"selected":""}>${u.role==="Admin"?"All clients (Admin)":"ALL clients"}</option></select>
+          <button class="btn light small" onclick="AD.moveClients('${u.username}')">MOVE CLIENTS</button>
           <button class="btn light small" onclick="AD.resetPin('${u.username}')">RESET PIN</button>
           ${st==="Pending"?`<button class="btn green small" onclick="AD.setStatus('${u.username}','Active')">APPROVE</button>`:
             st==="Active"?`<button class="btn light small" ${self?"disabled":""} onclick="AD.setStatus('${u.username}','Deactivated')">DEACTIVATE</button>`:
@@ -2113,6 +2131,14 @@ setNew();
     alert("Account created for "+name+".");reUsers();
   });
   AD.setRole=guard(async(un,role)=>{try{await api("userUpdate",{username:un,role})}finally{reUsers()}});
+  AD.setViewAll=guard(async(un,v)=>{try{await api("userUpdate",{username:un,viewAll:v})}finally{reUsers()}});
+  AD.moveClients=guard(async un=>{
+    const to=prompt("Move ALL clients of @"+un+" to which username?\n(Clients whose name already exists with the new owner stay where they are.)");
+    if(!to)return;
+    const r=await api("customersReassign",{from:un,to:to.trim().toLowerCase()});
+    alert(r.moved+" client(s) moved."+(r.skipped?"\n"+r.skipped+" skipped (same name already exists with the new owner).":""));
+    cloudRefresh(true);
+  });
   AD.setDesig=guard(async(un,v)=>{await api("userUpdate",{username:un,designation:v})});
   AD.setStatus=guard(async(un,status)=>{try{await api("userUpdate",{username:un,status})}finally{reUsers()}});
   AD.resetPin=guard(async un=>{
